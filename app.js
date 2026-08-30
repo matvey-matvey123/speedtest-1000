@@ -1,12 +1,12 @@
 (() => {
   const q = (id) => document.getElementById(id);
 
-  const CONFIG_KEY = 'speedtest1000_config';
-  const STORE_KEY = 'speedtest1000_state';
+  const CONFIG_KEY = 'speedtest1000_config_v2';
+  const STORE_KEY = 'speedtest1000_state_v2';
 
   const defaults = {
-    total: 1000,
-    durationMin: 10,
+    total: 100,
+    durationMin: 5,
     chunkBytes: 100 * 1024 * 1024,
     upBytes: 10 * 1024 * 1024,
   };
