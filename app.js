@@ -23,7 +23,8 @@
 
   function blankState() {
     return {
-      paused: false,
+      started: false,
+      paused: true,
       pausedAt: null,
       tests: [],
       current: null,
@@ -43,6 +44,21 @@
   let state = loadState() || blankState();
   if (!Array.isArray(state.tests)) state.tests = [];
   if (state.current && typeof state.current.bytes !== 'number') state.current = null;
+
+  if (typeof state.started !== 'boolean') state.started = false;
+  if (!state.started) {
+    state.current = null;
+    state.paused = true;
+    state.pausedAt = null;
+  }
+  if (state.started && !state.paused && state.tests.length < config.total) {
+    state.paused = true;
+    state.pausedAt = Date.now();
+  }
+  if (state.current) {
+    const elapsed = Date.now() - state.current.startedAt;
+    if (elapsed >= config.durationMin * 60000) state.current = null;
+  }
 
   function save() {
     try {
@@ -140,7 +156,7 @@
     if (pumping) return;
     pumping = true;
     try {
-      while (!state.paused && state.tests.length < config.total) {
+      while (state.started && !state.paused && state.tests.length < config.total) {
         if (!state.current) {
           state.current = { startedAt: Date.now(), bytes: 0, ping: null, up: null };
         }
@@ -197,7 +213,18 @@
     localStorage.removeItem(STORE_KEY);
     state = blankState();
     render();
-    pump();
+  }
+
+  function onMainClick() {
+    if (!state.started) {
+      state.started = true;
+      state.paused = false;
+      state.pausedAt = null;
+      save();
+      pump();
+    } else {
+      setPaused(!state.paused);
+    }
   }
 
   function fmt(v, unit, digits) {
@@ -324,7 +351,9 @@
     const total = config.total;
     const pct = total ? Math.min(100, (done / total) * 100) : 0;
 
-    if (state.paused && done >= total) {
+    if (!state.started) {
+      q('phase').textContent = 'Ожидание запуска';
+    } else if (state.paused && done >= total) {
       q('phase').textContent = 'Завершено';
     } else if (state.paused) {
       q('phase').textContent = 'Пауза';
@@ -369,6 +398,9 @@
     if (done >= total) {
       btn.textContent = 'Завершено';
       btn.disabled = true;
+    } else if (!state.started) {
+      btn.textContent = 'Старт';
+      btn.disabled = false;
     } else {
       btn.textContent = state.paused ? 'Продолжить' : 'Пауза';
       btn.disabled = false;
@@ -378,7 +410,7 @@
     renderTable();
   }
 
-  q('btnMain').addEventListener('click', () => setPaused(!state.paused));
+  q('btnMain').addEventListener('click', onMainClick);
   q('btnReset').addEventListener('click', resetAll);
 
   q('cfgTotal').value = config.total;
@@ -406,12 +438,12 @@
   window.addEventListener('resize', render);
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && !state.paused && state.tests.length < config.total) pump();
+    if (!document.hidden && state.started && !state.paused && state.tests.length < config.total) pump();
   });
 
   render();
   setInterval(() => {
-    if (!state.paused && state.tests.length < config.total && !pumping) pump();
+    if (state.started && !state.paused && state.tests.length < config.total && !pumping) pump();
     render();
   }, 500);
 })();
