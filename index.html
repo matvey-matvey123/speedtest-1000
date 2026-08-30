@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Speed Test ×1000</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Speed Test ×1000</h1>
+    <p class="sub">1000 замеров скорости интернета подряд, один тест каждые 10 минут</p>
+  </header>
+
+  <section class="card hero">
+    <h2>Запуск</h2>
+    <div class="progress-row">
+      <div class="progress"><div id="progressFill"></div></div>
+      <div id="progressLabel" class="progress-label"></div>
+    </div>
+    <div class="status-grid">
+      <div class="stat"><span class="k">Выполнено</span><span id="statDone"></span></div>
+      <div class="stat"><span class="k">Следующий тест</span><span id="countdown"></span></div>
+      <div class="stat"><span class="k">Этап</span><span id="phase"></span></div>
+      <div class="stat"><span class="k">Прогноз завершения</span><span id="eta"></span></div>
+    </div>
+    <div class="controls">
+      <button id="btnMain" class="btn primary"></button>
+      <button id="btnNow" class="btn">Сейчас</button>
+      <button id="btnReset" class="btn danger">Сброс</button>
+    </div>
+  </section>
+
+  <section class="stats-wrap">
+    <div class="card stat-item"><span class="k">Последний, Мбит/с</span><span id="lastSpeed" class="v"></span></div>
+    <div class="card stat-item"><span class="k">Средний, Мбит/с</span><span id="avgSpeed" class="v"></span></div>
+    <div class="card stat-item"><span class="k">Минимум, Мбит/с</span><span id="minSpeed" class="v"></span></div>
+    <div class="card stat-item"><span class="k">Максимум, Мбит/с</span><span id="maxSpeed" class="v"></span></div>
+    <div class="card stat-item"><span class="k">Последний пинг, мс</span><span id="lastPing" class="v"></span></div>
+    <div class="card stat-item"><span class="k">Последняя загрузка, Мбит/с</span><span id="lastUp" class="v"></span></div>
+  </section>
+
+  <section class="card">
+    <h2>График скорости скачивания</h2>
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+  </section>
+
+  <section class="card">
+    <h2>История (последние 20)</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>#</th><th>Время</th><th>Пинг</th><th>Скачивание</th><th>Загрузка</th></tr>
+        </thead>
+        <tbody id="historyBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card settings">
+    <h2>Настройки</h2>
+    <label>Число тестов <input type="number" id="cfgTotal" min="1"></label>
+    <label>Интервал, мин <input type="number" id="cfgInterval" min="0.1" step="0.1"></label>
+  </section>
+
+  <footer>Держите вкладку открытой: 1000 × 10 мин ≈ 6 дней 22 часа. Замер выполняется через серверы Cloudflare.</footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
