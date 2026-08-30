@@ -6,9 +6,9 @@
 
   const defaults = {
     total: 1000,
-    intervalMin: 10,
-    downsBytes: 20 * 1024 * 1024,
-    upsBytes: 5 * 1024 * 1024,
+    durationMin: 10,
+    chunkBytes: 100 * 1024 * 1024,
+    upBytes: 10 * 1024 * 1024,
   };
 
   let config = { ...defaults };
@@ -17,43 +17,45 @@
     if (saved && typeof saved === 'object') config = { ...defaults, ...saved };
   } catch (e) {}
 
-  const DOWNS_URL = () => 'https://speed.cloudflare.com/__down?bytes=' + config.downsBytes;
-  const UPS_URL = 'https://speed.cloudflare.com/__up';
   const PING_URL = 'https://speed.cloudflare.com/__down?bytes=1024';
+  const UPS_URL = 'https://speed.cloudflare.com/__up';
+  const DOWNS_URL = () => 'https://speed.cloudflare.com/__down?bytes=' + config.chunkBytes;
 
   function blankState() {
     return {
-      started: false,
-      paused: true,
-      running: false,
-      results: [],
-      startAt: null,
-      nextRunAt: null,
-      phase: 'Ожидание',
-      lastFastSample: null,
+      paused: false,
+      pausedAt: null,
+      tests: [],
+      current: null,
     };
   }
 
   function loadState() {
     try {
       const s = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
-      return s && Array.isArray(s.results) ? s : null;
+      if (s && typeof s === 'object' && Array.isArray(s.tests)) return s;
+      return null;
     } catch (e) {
       return null;
     }
   }
 
   let state = loadState() || blankState();
-  state.running = false;
+  if (!Array.isArray(state.tests)) state.tests = [];
+  if (state.current && typeof state.current.bytes !== 'number') state.current = null;
 
   function save() {
-    const s = { ...state, running: false };
-    localStorage.setItem(STORE_KEY, JSON.stringify(s));
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    } catch (e) {}
   }
 
   function saveConfig() {
     localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
   }
+
+  let currentAbort = null;
+  let pumping = false;
 
   async function timedGet(url) {
     try {
@@ -79,33 +81,11 @@
     return n ? Math.round(total / n) : null;
   }
 
-  async function measureDownload() {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 40000);
-      const resp = await fetch(DOWNS_URL(), { cache: 'no-store', signal: controller.signal });
-      if (!resp.ok || !resp.body) throw new Error('bad response');
-      const reader = resp.body.getReader();
-      let bytes = 0;
-      const start = performance.now();
-      for (;;) {
-        const step = await reader.read();
-        if (step.value) bytes += step.value.length;
-        if (step.done) break;
-      }
-      clearTimeout(timer);
-      const secs = (performance.now() - start) / 1000;
-      return secs > 0 ? (bytes * 8) / secs / 1e6 : null;
-    } catch (e) {
-      return null;
-    }
-  }
-
   async function measureUpload() {
     try {
-      const payload = new Uint8Array(config.upsBytes);
+      const payload = new Uint8Array(config.upBytes);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 40000);
+      const timer = setTimeout(() => controller.abort(), 30000);
       const start = performance.now();
       const resp = await fetch(UPS_URL, {
         method: 'POST',
@@ -116,77 +96,99 @@
       clearTimeout(timer);
       const secs = (performance.now() - start) / 1000;
       if (resp.status === 413 || (resp.status >= 400 && resp.status < 500)) return null;
-      return secs > 0 ? (config.upsBytes * 8) / secs / 1e6 : null;
+      return secs > 0 ? (config.upBytes * 8) / secs / 1e6 : null;
     } catch (e) {
       return null;
     }
   }
 
-  async function runTest() {
-    state.running = true;
-    state.paused = false;
-    render();
+  function streamOnce() {
+    const controller = new AbortController();
+    currentAbort = controller;
+    const timer = setTimeout(() => controller.abort(), 30000);
+    return fetch(DOWNS_URL(), { cache: 'no-store', signal: controller.signal })
+      .then(async (resp) => {
+        if (!resp.ok || !resp.body) return 0;
+        const reader = resp.body.getReader();
+        let bytes = 0;
+        for (;;) {
+          const s = await reader.read();
+          if (s.value) bytes += s.value.length;
+          if (s.done) break;
+        }
+        return bytes;
+      })
+      .catch(() => 0)
+      .finally(() => {
+        clearTimeout(timer);
+        if (currentAbort === controller) currentAbort = null;
+      });
+  }
 
-    state.phase = 'Пинг…';
-    render();
-    const ping = await measurePing();
-
-    state.phase = 'Скачивание…';
-    render();
-    const down = await measureDownload();
-
-    state.phase = 'Загрузка…';
-    render();
-    const up = await measureUpload();
-
-    state.results.push({ t: Date.now(), ping, down, up });
-    state.nextRunAt = Date.now() + config.intervalMin * 60000;
-    state.running = false;
-    state.phase = state.results.length >= config.total ? 'Завершено' : 'Ожидание';
-    save();
-    render();
-
-    if (state.results.length >= config.total) {
-      state.paused = true;
+  async function downloadLoop() {
+    const cur = state.current;
+    const durMs = config.durationMin * 60000;
+    while (!state.paused && Date.now() < cur.startedAt + durMs) {
+      const got = await streamOnce();
+      if (got > 0) cur.bytes += got;
       save();
-      render();
+      if (got <= 0 && !state.paused) await new Promise((r) => setTimeout(r, 1500));
     }
   }
 
-  function tick() {
-    if (
-      state.started &&
-      !state.paused &&
-      !state.running &&
-      state.results.length < config.total &&
-      Date.now() >= (state.nextRunAt || 0)
-    ) {
-      runTest();
+  async function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (!state.paused && state.tests.length < config.total) {
+        if (!state.current) {
+          state.current = { startedAt: Date.now(), bytes: 0, ping: null, up: null };
+        }
+        if (state.current.ping == null) state.current.ping = await measurePing();
+        if (state.current.up == null) state.current.up = await measureUpload();
+        await downloadLoop();
+        if (state.paused) break;
+        if (Date.now() >= state.current.startedAt + config.durationMin * 60000) {
+          finalize();
+        } else {
+          break;
+        }
+      }
+    } finally {
+      pumping = false;
     }
-    render();
   }
 
-  function toggleStart() {
-    if (state.running || state.results.length >= config.total) return;
-    if (!state.started || state.paused) {
-      state.started = true;
+  function finalize() {
+    const cur = state.current;
+    const seconds = (Date.now() - cur.startedAt) / 1000;
+    const down = seconds > 0 ? (cur.bytes * 8) / seconds / 1e6 : null;
+    state.tests.push({
+      t: Date.now(),
+      ping: cur.ping,
+      up: cur.up,
+      down,
+      bytes: cur.bytes,
+      seconds,
+    });
+    state.current = null;
+    if (state.tests.length >= config.total) state.paused = true;
+    save();
+  }
+
+  function setPaused(p) {
+    if (p && !state.paused) {
+      state.paused = true;
+      state.pausedAt = Date.now();
+      if (currentAbort) currentAbort.abort();
+      save();
+    } else if (!p && state.paused) {
+      if (state.current) state.current.startedAt += Date.now() - (state.pausedAt || Date.now());
       state.paused = false;
-      if (!state.startAt) state.startAt = Date.now();
-      if (state.nextRunAt == null || state.nextRunAt <= Date.now()) state.nextRunAt = Date.now();
+      state.pausedAt = null;
       save();
-    } else {
-      state.paused = true;
-      state.phase = 'Пауза';
-      save();
+      pump();
     }
-    render();
-  }
-
-  function runNow() {
-    if (state.running || state.paused || !state.started) return;
-    if (state.results.length >= config.total) return;
-    state.nextRunAt = Date.now() - 1;
-    save();
     render();
   }
 
@@ -195,6 +197,7 @@
     localStorage.removeItem(STORE_KEY);
     state = blankState();
     render();
+    pump();
   }
 
   function fmt(v, unit, digits) {
@@ -202,34 +205,22 @@
     return v.toFixed(digits == null ? 1 : digits) + ' ' + unit;
   }
 
-  function countdownText() {
-    if (state.results.length >= config.total) return 'Завершено';
-    if (state.paused) return 'На паузе';
-    const ms = (state.nextRunAt || 0) - Date.now();
-    if (ms <= 0) return 'Запуск…';
+  function mmss(ms) {
+    if (ms < 0) ms = 0;
     const s = Math.floor(ms / 1000);
-    const mm = String(Math.floor(s / 60)).padStart(2, '0');
-    const ss = String(s % 60).padStart(2, '0');
-    return mm + ':' + ss;
+    return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
   }
 
-  function stats() {
-    const vals = state.results.map((r) => r.down).filter((v) => v != null && v > 0);
-    const last = state.results[state.results.length - 1] || null;
-    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-    return {
-      last,
-      avg,
-      min: vals.length ? Math.min(...vals) : null,
-      max: vals.length ? Math.max(...vals) : null,
-      count: vals.length,
-    };
+  function liveMbps() {
+    if (!state.current) return null;
+    const secs = (Date.now() - state.current.startedAt) / 1000;
+    return secs > 0 ? (state.current.bytes * 8) / secs / 1e6 : null;
   }
 
   function etaText() {
-    if (state.results.length >= config.total) return 'Завершено';
-    const remain = Math.max(0, config.total - state.results.length);
-    const ms = remain * config.intervalMin * 60000;
+    if (state.tests.length >= config.total) return 'Завершено';
+    const remain = Math.max(0, config.total - state.tests.length);
+    const ms = remain * config.durationMin * 60000;
     const days = Math.floor(ms / 86400000);
     const hours = Math.floor((ms % 86400000) / 3600000);
     let out = 'Тестов осталось: ' + remain + '.';
@@ -257,7 +248,7 @@
     const iw = w - padL - padR;
     const ih = h - padT - padB;
 
-    const vals = state.results.map((r) => r.down).filter((v) => v != null && v > 0);
+    const vals = state.tests.map((t) => t.down).filter((v) => v != null && v > 0);
 
     ctx.font = '11px monospace';
     const niceMax = vals.length ? Math.max(...vals) * 1.1 : 1;
@@ -307,21 +298,21 @@
 
   function renderTable() {
     const tbody = q('historyBody');
-    const rows = state.results.slice(-20).reverse();
+    const rows = state.tests.slice(-20).reverse();
     if (!rows.length) {
       tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted)">Пока пусто</td></tr>';
       return;
     }
     tbody.innerHTML = rows
-      .map((r, i) => {
-        const idx = state.results.length - i;
+      .map((t, i) => {
+        const idx = state.tests.length - i;
         return (
           '<tr>' +
           '<td>#' + idx + '</td>' +
-          '<td>' + new Date(r.t).toLocaleString('ru-RU') + '</td>' +
-          '<td>' + fmt(r.ping, 'мс', 0) + '</td>' +
-          '<td>' + fmt(r.down, '', 1) + '</td>' +
-          '<td>' + fmt(r.up, '', 1) + '</td>' +
+          '<td>' + new Date(t.t).toLocaleString('ru-RU') + '</td>' +
+          '<td>' + fmt(t.ping, 'мс', 0) + '</td>' +
+          '<td>' + fmt(t.down, '', 1) + '</td>' +
+          '<td>' + fmt(t.up, '', 1) + '</td>' +
           '</tr>'
         );
       })
@@ -329,65 +320,98 @@
   }
 
   function render() {
-    const done = state.results.length;
+    const done = state.tests.length;
     const total = config.total;
     const pct = total ? Math.min(100, (done / total) * 100) : 0;
+
+    if (state.paused && done >= total) {
+      q('phase').textContent = 'Завершено';
+    } else if (state.paused) {
+      q('phase').textContent = 'Пауза';
+    } else {
+      q('phase').textContent = state.current ? 'Измерение скорости…' : 'Подготовка…';
+    }
+    q('curTest').textContent = state.current ? '#' + (done + 1) + ' из ' + total : (done >= total ? '—' : '#' + (done + 1) + ' из ' + total);
+    q('liveSpeed').textContent = fmt(liveMbps(), '');
+    q('curBytes').textContent = state.current ? fmt((state.current.bytes / 1048576), 'МБ', 0) : '—';
+
+    const durMs = config.durationMin * 60000;
+    if (state.current) {
+      const elapsed = Date.now() - state.current.startedAt;
+      const curPct = Math.min(100, (elapsed / durMs) * 100);
+      q('curProgressFill').style.width = curPct.toFixed(2) + '%';
+      q('curTime').textContent = mmss(elapsed) + ' / ' + mmss(durMs);
+    } else if (state.paused && done < total) {
+      q('curProgressFill').style.width = '0%';
+      q('curTime').textContent = 'На паузе';
+    } else {
+      q('curProgressFill').style.width = '100%';
+      q('curTime').textContent = 'Готово';
+    }
 
     q('progressFill').style.width = pct.toFixed(2) + '%';
     q('progressLabel').textContent = pct.toFixed(1) + '%';
     q('statDone').textContent = done + ' / ' + total;
-    q('countdown').textContent = countdownText();
-    q('phase').textContent = state.phase;
     q('eta').textContent = etaText();
 
-    const s = stats();
-    q('lastSpeed').textContent = fmt(s.last ? s.last.down : null, '');
-    q('avgSpeed').textContent = fmt(s.avg, '');
-    q('minSpeed').textContent = fmt(s.min, '');
-    q('maxSpeed').textContent = fmt(s.max, '');
-    q('lastPing').textContent = fmt(s.last ? s.last.ping : null, 'мс', 0);
-    q('lastUp').textContent = fmt(s.last ? s.last.up : null, '');
+    const vals = state.tests.map((t) => t.down).filter((v) => v != null && v > 0);
+    const last = state.tests[state.tests.length - 1] || null;
+    const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+
+    q('lastSpeed').textContent = fmt(last ? last.down : null, '');
+    q('avgSpeed').textContent = fmt(avg, '');
+    q('minSpeed').textContent = fmt(vals.length ? Math.min(...vals) : null, '');
+    q('maxSpeed').textContent = fmt(vals.length ? Math.max(...vals) : null, '');
+    q('lastPing').textContent = fmt(last ? last.ping : null, 'мс', 0);
+    q('lastUp').textContent = fmt(last ? last.up : null, '');
 
     const btn = q('btnMain');
-    btn.disabled = state.running || done >= total;
-    if (!state.started) btn.textContent = 'Старт';
-    else if (state.running) btn.textContent = 'Тест идёт…';
-    else if (state.paused) {
-      btn.textContent = done >= total ? 'Завершено' : 'Продолжить';
-      btn.disabled = done >= total;
-    } else btn.textContent = 'Пауза';
-
-    q('btnNow').disabled = state.running || state.paused || !state.started || done >= total;
+    if (done >= total) {
+      btn.textContent = 'Завершено';
+      btn.disabled = true;
+    } else {
+      btn.textContent = state.paused ? 'Продолжить' : 'Пауза';
+      btn.disabled = false;
+    }
 
     drawChart();
     renderTable();
   }
 
-  q('btnMain').addEventListener('click', toggleStart);
-  q('btnNow').addEventListener('click', runNow);
+  q('btnMain').addEventListener('click', () => setPaused(!state.paused));
   q('btnReset').addEventListener('click', resetAll);
 
   q('cfgTotal').value = config.total;
-  q('cfgInterval').value = config.intervalMin;
+  q('cfgDuration').value = config.durationMin;
 
   q('cfgTotal').addEventListener('change', (e) => {
     const v = parseInt(e.target.value, 10);
     config.total = v > 0 ? v : defaults.total;
     e.target.value = config.total;
     saveConfig();
+    if (state.tests.length >= config.total && !state.paused) {
+      finalize();
+    }
     render();
   });
 
-  q('cfgInterval').addEventListener('change', (e) => {
+  q('cfgDuration').addEventListener('change', (e) => {
     const v = parseFloat(e.target.value);
-    config.intervalMin = v > 0 ? v : defaults.intervalMin;
-    e.target.value = config.intervalMin;
+    config.durationMin = v > 0 ? v : defaults.durationMin;
+    e.target.value = config.durationMin;
     saveConfig();
     render();
   });
 
   window.addEventListener('resize', render);
 
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !state.paused && state.tests.length < config.total) pump();
+  });
+
   render();
-  setInterval(tick, 1000);
+  setInterval(() => {
+    if (!state.paused && state.tests.length < config.total && !pumping) pump();
+    render();
+  }, 500);
 })();
